@@ -14,7 +14,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { ArrowLeft, Send, Clock, Loader2, Users, Lock, Save } from 'lucide-react';
+import { ArrowLeft, Send, Loader2, Users, Save } from 'lucide-react';
 
 interface AudienceConfig {
   type: string;
@@ -45,7 +45,6 @@ export function Step4ScheduleSend({
   isProcessing,
   progress,
 }: Step4Props) {
-  const [timing, setTiming] = useState<'now' | 'later'>('now');
   const [showConfirm, setShowConfirm] = useState(false);
   const [estimatedReach, setEstimatedReach] = useState<number>(0);
   const [loadingReach, setLoadingReach] = useState(true);
@@ -139,41 +138,6 @@ export function Step4ScheduleSend({
           <div>
             <p className="text-xs text-slate-400">Language</p>
             <p className="text-white">{template.language ?? 'en_US'}</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Delivery Timing */}
-      <div className="space-y-3">
-        <p className="text-sm font-medium text-white">Delivery Timing</p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <button
-            onClick={() => setTiming('now')}
-            className={`flex items-start gap-3 rounded-xl border p-4 text-left transition-all ${
-              timing === 'now'
-                ? 'border-violet-500 bg-violet-500/5 ring-1 ring-violet-500/30'
-                : 'border-slate-800 bg-slate-900/50 hover:border-slate-700'
-            }`}
-          >
-            <Send className={`mt-0.5 h-4 w-4 ${timing === 'now' ? 'text-violet-400' : 'text-slate-400'}`} />
-            <div>
-              <p className="text-sm font-medium text-white">Send Immediately</p>
-              <p className="mt-0.5 text-xs text-slate-400">Start sending right away</p>
-            </div>
-          </button>
-
-          <div className="relative flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-900/30 p-4 opacity-60">
-            <Clock className="mt-0.5 h-4 w-4 text-slate-500" />
-            <div>
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-medium text-slate-400">Schedule for Later</p>
-                <span className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-medium text-slate-400">
-                  <Lock className="h-2.5 w-2.5" />
-                  Pro
-                </span>
-              </div>
-              <p className="mt-0.5 text-xs text-slate-500">Pick a date and time</p>
-            </div>
           </div>
         </div>
       </div>

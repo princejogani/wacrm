@@ -2,28 +2,45 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { useAuth } from "@/hooks/use-auth";
 import { cn } from "@/lib/utils";
-import type { Conversation, Message, Contact, ConversationStatus } from "@/types";
+import type {
+  Conversation,
+  Message,
+  Contact,
+  ConversationStatus,
+  MessageTemplate,
+  Profile,
+} from "@/types";
 import {
   MessageSquare,
   ChevronDown,
   UserPlus,
+  Check,
   Clock,
   ArrowLeft,
 } from "lucide-react";
 import { format, isToday, isYesterday, differenceInHours } from "date-fns";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./message-bubble";
 import { MessageComposer } from "./message-composer";
+import { TemplatePicker } from "./template-picker";
 import { toast } from "sonner";
+
+function renderTemplateBody(body: string, params: string[]): string {
+  return body.replace(/\{\{(\d+)\}\}/g, (_, raw) => {
+    const idx = Number(raw) - 1;
+    return params[idx] ?? `{{${raw}}}`;
+  });
+}
 
 interface MessageThreadProps {
   conversation: Conversation | null;
@@ -33,6 +50,10 @@ interface MessageThreadProps {
   onNewMessage: (message: Message) => void;
   onUpdateMessage: (id: string, updates: Partial<Message>) => void;
   onStatusChange: (conversationId: string, status: ConversationStatus) => void;
+  onAssignChange: (
+    conversationId: string,
+    assignedAgentId: string | null,
+  ) => void;
   /**
    * On mobile, the thread is shown full-screen with the conversation list
    * hidden. This callback lets the page deselect the active conversation
@@ -80,11 +101,37 @@ export function MessageThread({
   onNewMessage,
   onUpdateMessage,
   onStatusChange,
+  onAssignChange,
   onBack,
 }: MessageThreadProps) {
+  const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+
+  // Profiles are bounded by RLS to rows the current user is allowed to
+  // see — today that's just the current user, but the dropdown keeps the
+  // shape ready for shared-team workspaces without a refactor.
+  useEffect(() => {
+    let cancelled = false;
+    const supabase = createClient();
+    supabase
+      .from("profiles")
+      .select("*")
+      .order("full_name")
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          console.error("Failed to fetch profiles:", error);
+          return;
+        }
+        setProfiles((data as Profile[]) ?? []);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 24-hour session timer
   const sessionInfo = useMemo(() => {
@@ -263,8 +310,81 @@ export function MessageThread({
 
   const handleOpenTemplates = useCallback(() => {
     setTemplateModalOpen(true);
-    // Template modal implementation would go here
   }, []);
+
+  const handleSendTemplate = useCallback(
+    async (template: MessageTemplate, params: string[]) => {
+      if (!conversation) return;
+
+      const renderedBody = renderTemplateBody(template.body_text, params);
+      const tempId = `temp-${Date.now()}`;
+
+      const optimisticMsg: Message = {
+        id: tempId,
+        conversation_id: conversation.id,
+        sender_type: "agent",
+        content_type: "template",
+        content_text: renderedBody,
+        template_name: template.name,
+        status: "sending",
+        created_at: new Date().toISOString(),
+      };
+      onNewMessage(optimisticMsg);
+
+      try {
+        const res = await fetch("/api/whatsapp/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversation_id: conversation.id,
+            message_type: "template",
+            template_name: template.name,
+            template_params: params,
+            content_text: renderedBody,
+          }),
+        });
+
+        const payload = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          const reason = payload?.error || `HTTP ${res.status}`;
+          console.error("Failed to send template:", reason);
+          toast.error(`Failed to send template: ${reason}`);
+          onUpdateMessage(tempId, { status: "failed" });
+          return;
+        }
+
+        onUpdateMessage(tempId, { status: "sent" });
+      } catch (err) {
+        console.error("Failed to send template:", err);
+        const reason = err instanceof Error ? err.message : "network error";
+        toast.error(`Failed to send template: ${reason}`);
+        onUpdateMessage(tempId, { status: "failed" });
+      }
+    },
+    [conversation, onNewMessage, onUpdateMessage],
+  );
+
+  const handleAssignChange = useCallback(
+    async (agentId: string | null) => {
+      if (!conversation) return;
+
+      const supabase = createClient();
+      const { error } = await supabase
+        .from("conversations")
+        .update({ assigned_agent_id: agentId })
+        .eq("id", conversation.id);
+
+      if (error) {
+        console.error("Failed to update assignment:", error);
+        toast.error("Failed to update assignment");
+        return;
+      }
+
+      onAssignChange(conversation.id, agentId);
+    },
+    [conversation, onAssignChange],
+  );
 
   // Empty state
   if (!conversation || !contact) {
@@ -288,6 +408,11 @@ export function MessageThread({
   const currentStatus = STATUS_OPTIONS.find(
     (s) => s.value === conversation.status
   );
+  const assignedAgentId = conversation.assigned_agent_id ?? null;
+  const currentAssignee = profiles.find((p) => p.user_id === assignedAgentId);
+  const assignLabel = assignedAgentId
+    ? (currentAssignee?.full_name ?? "Assigned")
+    : "Assign";
 
   return (
     <div className="flex flex-1 flex-col bg-slate-950">
@@ -353,15 +478,60 @@ export function MessageThread({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          {/* Assign button */}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1 text-xs text-slate-400 hover:text-white"
-          >
-            <UserPlus className="h-3 w-3" />
-            Assign
-          </Button>
+          {/* Assign dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className={cn(
+                "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-slate-800",
+                assignedAgentId ? "text-violet-400" : "text-slate-400"
+              )}
+            >
+              <UserPlus className="h-3 w-3" />
+              <span className="hidden sm:inline">{assignLabel}</span>
+              <ChevronDown className="h-3 w-3" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className="border-slate-700 bg-slate-800"
+            >
+              {profiles.length === 0 ? (
+                <DropdownMenuItem disabled className="text-sm text-slate-500">
+                  No teammates available
+                </DropdownMenuItem>
+              ) : (
+                profiles.map((p) => {
+                  const isSelected = p.user_id === assignedAgentId;
+                  return (
+                    <DropdownMenuItem
+                      key={p.id}
+                      onClick={() => handleAssignChange(p.user_id)}
+                      className={cn(
+                        "text-sm",
+                        isSelected ? "text-violet-400" : "text-slate-300"
+                      )}
+                    >
+                      <span className="flex-1">
+                        {p.full_name}
+                        {p.user_id === user?.id ? " (me)" : ""}
+                      </span>
+                      {isSelected && <Check className="ml-2 h-3 w-3" />}
+                    </DropdownMenuItem>
+                  );
+                })
+              )}
+              {assignedAgentId && (
+                <>
+                  <DropdownMenuSeparator className="bg-slate-700" />
+                  <DropdownMenuItem
+                    onClick={() => handleAssignChange(null)}
+                    className="text-sm text-slate-400"
+                  >
+                    Unassign
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -406,6 +576,12 @@ export function MessageThread({
         sessionExpired={sessionInfo.expired}
         onSend={handleSend}
         onOpenTemplates={handleOpenTemplates}
+      />
+
+      <TemplatePicker
+        open={templateModalOpen}
+        onOpenChange={setTemplateModalOpen}
+        onSelect={handleSendTemplate}
       />
     </div>
   );
