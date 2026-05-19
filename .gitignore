@@ -6,6 +6,7 @@
 .pnp.*
 .wwebjs_auth
 .wwebjs_cache
+package-lock.json
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
