@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { CustomField, Tag } from '@/types';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,9 @@ import {
   ArrowRight,
   ArrowLeft,
   X,
+  FileText,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 
 type AudienceType = 'all' | 'tags' | 'custom_field' | 'csv';
@@ -89,6 +92,68 @@ export function Step2SelectAudience({
   const [loadingFields, setLoadingFields] = useState(false);
   const [estimatedCount, setEstimatedCount] = useState<number | null>(null);
   const [loadingCount, setLoadingCount] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function parseCsv(text: string): { phone: string; name?: string }[] {
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    if (lines.length === 0) return [];
+
+    // Detect header row
+    const firstLower = lines[0].toLowerCase();
+    const hasHeader = firstLower.includes('phone') || firstLower.includes('name') || firstLower.includes('mobile');
+    const dataLines = hasHeader ? lines.slice(1) : lines;
+
+    // Detect delimiter
+    const delim = lines[0].includes('\t') ? '\t' : ',';
+
+    // Detect column positions from header or assume phone=0, name=1
+    let phoneCol = 0;
+    let nameCol = 1;
+    if (hasHeader) {
+      const headers = lines[0].split(delim).map((h) => h.trim().toLowerCase().replace(/["']/g, ''));
+      const pi = headers.findIndex((h) => h.includes('phone') || h.includes('mobile') || h.includes('number'));
+      const ni = headers.findIndex((h) => h.includes('name'));
+      if (pi !== -1) phoneCol = pi;
+      if (ni !== -1) nameCol = ni;
+    }
+
+    const results: { phone: string; name?: string }[] = [];
+    for (const line of dataLines) {
+      const cols = line.split(delim).map((c) => c.trim().replace(/^["']|["']$/g, ''));
+      const rawPhone = cols[phoneCol]?.trim();
+      if (!rawPhone) continue;
+      // Normalize: keep digits and leading +
+      const phone = rawPhone.startsWith('+') ? '+' + rawPhone.slice(1).replace(/\D/g, '') : rawPhone.replace(/\D/g, '');
+      if (phone.replace(/\D/g, '').length < 7) continue; // skip invalid
+      const name = cols[nameCol]?.trim() || undefined;
+      results.push({ phone, name });
+    }
+    return results;
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setCsvError(null);
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.name.endsWith('.csv') && !file.name.endsWith('.txt') && file.type !== 'text/plain') {
+      setCsvError('Please upload a .csv file');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      const contacts = parseCsv(text);
+      if (contacts.length === 0) {
+        setCsvError('No valid phone numbers found in the file');
+        return;
+      }
+      onUpdate({ ...audience, type: 'csv', csvContacts: contacts });
+    };
+    reader.readAsText(file);
+    // Reset input so same file can be re-uploaded
+    e.target.value = '';
+  }
 
   // Tags are used both by the primary "Filter by Tags" audience type
   // AND by the exclude-list below — so always load once on mount.
@@ -384,6 +449,105 @@ export function Step2SelectAudience({
                 placeholder="Value"
                 className="h-9 rounded-lg border border-slate-700 bg-slate-800 px-2.5 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-500 focus:ring-1 focus:ring-violet-500"
               />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* CSV Upload */}
+      {audience.type === 'csv' && (
+        <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+          <p className="text-sm font-medium text-white">Upload CSV File</p>
+
+          {/* Format guide */}
+          <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-3">
+            <p className="mb-2 text-xs font-medium text-slate-300">Required CSV format:</p>
+            <pre className="text-[11px] text-slate-400 leading-relaxed">{`phone,name
++919876543210,John Doe
++14155552671,Jane Smith
+919876543211,Rahul`}</pre>
+            <p className="mt-2 text-[11px] text-slate-500">
+              • First column: phone number (with or without +, country code required)<br />
+              • Second column: name (optional)<br />
+              • Header row optional — auto-detected<br />
+              • Comma or tab separated
+            </p>
+          </div>
+
+          {/* Upload area */}
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-700 bg-slate-900 py-8 transition-colors hover:border-violet-500/50 hover:bg-violet-500/5"
+          >
+            <Upload className="h-8 w-8 text-slate-500" />
+            <p className="text-sm font-medium text-slate-300">Click to upload CSV</p>
+            <p className="text-xs text-slate-500">.csv files only</p>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,text/csv,text/plain"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </div>
+
+          {/* Error */}
+          {csvError && (
+            <div className="flex items-center gap-2 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2">
+              <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+              <p className="text-xs text-red-300">{csvError}</p>
+            </div>
+          )}
+
+          {/* Loaded contacts preview */}
+          {audience.csvContacts && audience.csvContacts.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-violet-400" />
+                <p className="text-sm font-medium text-white">
+                  {audience.csvContacts.length.toLocaleString()} contacts loaded
+                </p>
+                <button
+                  onClick={() => onUpdate({ ...audience, csvContacts: [] })}
+                  className="ml-auto text-xs text-slate-500 hover:text-red-400"
+                >
+                  Clear
+                </button>
+              </div>
+              {/* Preview first 5 rows */}
+              <div className="overflow-hidden rounded-lg border border-slate-700">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-700 bg-slate-800">
+                      <th className="px-3 py-2 text-left font-medium text-slate-400">#</th>
+                      <th className="px-3 py-2 text-left font-medium text-slate-400">Phone</th>
+                      <th className="px-3 py-2 text-left font-medium text-slate-400">Name</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {audience.csvContacts.slice(0, 5).map((c, i) => (
+                      <tr key={i} className="border-b border-slate-800 last:border-0">
+                        <td className="px-3 py-2 text-slate-500">{i + 1}</td>
+                        <td className="px-3 py-2 font-mono text-slate-300">{c.phone}</td>
+                        <td className="px-3 py-2 text-slate-400">{c.name ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {audience.csvContacts.length > 5 && (
+                  <p className="px-3 py-2 text-center text-xs text-slate-500">
+                    +{audience.csvContacts.length - 5} more
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Empty state */}
+          {(!audience.csvContacts || audience.csvContacts.length === 0) && !csvError && (
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <FileText className="h-4 w-4" />
+              No file uploaded yet
             </div>
           )}
         </div>

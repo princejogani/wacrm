@@ -37,7 +37,8 @@ export default function InboxPage() {
   // elsewhere.
   const autoSelectedForDeepLinkRef = useRef<string | null>(null);
 
-  // Check WhatsApp connection status on mount
+  // Check WhatsApp connection status on mount — Meta OR wwebjs counts as connected
+  // Also restores wwebjs session if it was lost after server restart
   useEffect(() => {
     const checkConnection = async () => {
       const supabase = createClient();
@@ -45,18 +46,31 @@ export default function InboxPage() {
         data: { session },
       } = await supabase.auth.getSession();
       const user = session?.user;
-
       if (!user) return;
 
-      // Table is `whatsapp_config` (singular) — the previous "whatsapp_configs"
-      // query always returned no rows, so the banner always showed "not connected".
-      const { data } = await supabase
+      // Silently restore wwebjs session if needed (fire-and-forget)
+      fetch('/api/whatsapp/wwebjs/init', { method: 'POST' }).catch(() => {})
+
+      // Check Meta config
+      const { data: metaConfig } = await supabase
         .from("whatsapp_config")
         .select("status")
         .eq("user_id", user.id)
         .maybeSingle();
 
-      setWhatsappConnected(data?.status === "connected");
+      if (metaConfig?.status === "connected") {
+        setWhatsappConnected(true);
+        return;
+      }
+
+      // Check wwebjs session
+      try {
+        const res = await fetch("/api/whatsapp/wwebjs/session");
+        const data = await res.json();
+        setWhatsappConnected(data?.status === "connected");
+      } catch {
+        setWhatsappConnected(false);
+      }
     };
 
     checkConnection();

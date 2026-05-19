@@ -54,6 +54,8 @@ const SECURITY_HEADERS = [
 ] as const;
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ["*.ngrok-free.app", "*.ngrok.io"],
+  serverExternalPackages: ["whatsapp-web.js", "puppeteer"],
   /**
    * Cache-Control policy.
    *

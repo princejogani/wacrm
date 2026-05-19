@@ -4,6 +4,8 @@
 /node_modules
 /.pnp
 .pnp.*
+.wwebjs_auth
+.wwebjs_cache
 .yarn/*
 !.yarn/patches
 !.yarn/plugins

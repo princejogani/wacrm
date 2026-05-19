@@ -8,11 +8,8 @@ import {
   phoneVariants,
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
-import {
-  checkRateLimit,
-  rateLimitResponse,
-  RATE_LIMITS,
-} from '@/lib/rate-limit'
+import { getSession } from '@/lib/whatsapp/wwebjs-manager'
+import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 
 interface BroadcastResult {
   phone: string
@@ -21,31 +18,11 @@ interface BroadcastResult {
   error?: string
 }
 
-/**
- * Two input shapes are accepted:
- *
- *   NEW (preferred — supports per-recipient variable substitution):
- *     {
- *       recipients: Array<{ phone: string; params: string[] }>,
- *       template_name, template_language
- *     }
- *
- *   LEGACY (all phones receive the same params — kept so existing
- *   callers don't break):
- *     {
- *       phone_numbers: string[],
- *       template_params: string[],
- *       template_name, template_language
- *     }
- *
- * Previous implementation only supported the legacy shape, and the
- * sending hook was forced to ship every batch with `templateParams[0]`
- * — meaning every recipient got contact-0's personalization. The new
- * shape is what actually fixes that.
- */
 interface NewRecipient {
   phone: string
   params?: string[]
+  /** Plain text body — used when falling back to wwebjs */
+  text?: string
 }
 
 export async function POST(request: Request) {
@@ -61,13 +38,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    // Per-user broadcast budget. Note: this limits how often a user
-    // can *start* a campaign, not how many messages go out inside
-    // one — the fan-out loop below runs without additional gating.
     const limit = checkRateLimit(`broadcast:${user.id}`, RATE_LIMITS.broadcast)
-    if (!limit.success) {
-      return rateLimitResponse(limit)
-    }
+    if (!limit.success) return rateLimitResponse(limit)
 
     const body = await request.json()
     const {
@@ -78,119 +50,124 @@ export async function POST(request: Request) {
       template_params,
     } = body
 
-    // Normalize to a list of {phone, params} regardless of shape.
     let recipients: NewRecipient[]
     if (Array.isArray(newRecipients) && newRecipients.length > 0) {
       recipients = newRecipients
     } else if (Array.isArray(phone_numbers) && phone_numbers.length > 0) {
-      const shared: string[] = Array.isArray(template_params)
-        ? template_params
-        : []
-      recipients = phone_numbers.map((phone: string) => ({
-        phone,
-        params: shared,
-      }))
+      const shared: string[] = Array.isArray(template_params) ? template_params : []
+      recipients = phone_numbers.map((phone: string) => ({ phone, params: shared }))
     } else {
       return NextResponse.json(
-        {
-          error:
-            'Provide either `recipients` (preferred) or `phone_numbers` — must be a non-empty array',
-        },
-        { status: 400 }
+        { error: 'Provide either `recipients` or `phone_numbers` — must be a non-empty array' },
+        { status: 400 },
       )
     }
 
     if (!template_name) {
-      return NextResponse.json(
-        { error: 'template_name is required' },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: 'template_name is required' }, { status: 400 })
     }
 
-    const { data: config, error: configError } = await supabase
+    // ── Determine transport ───────────────────────────────────────────
+    const { data: metaConfig } = await supabase
       .from('whatsapp_config')
       .select('*')
       .eq('user_id', user.id)
-      .single()
+      .eq('status', 'connected')
+      .maybeSingle()
 
-    if (configError || !config) {
+    const wwebjsSession = getSession(user.id)
+    const useWwebjs = !metaConfig && wwebjsSession?.status === 'connected'
+
+    if (!metaConfig && !useWwebjs) {
       return NextResponse.json(
-        {
-          error:
-            'WhatsApp not configured. Please set up your WhatsApp integration first.',
-        },
-        { status: 400 }
+        { error: 'No WhatsApp connection available. Connect via Meta API or scan the QR code.' },
+        { status: 400 },
       )
     }
-
-    const accessToken = decrypt(config.access_token)
 
     const results: BroadcastResult[] = []
     let sentCount = 0
     let failedCount = 0
 
-    for (const recipient of recipients) {
-      const sanitized = sanitizePhoneForMeta(recipient.phone)
-
-      if (!isValidE164(sanitized)) {
-        results.push({
-          phone: recipient.phone,
-          status: 'failed',
-          error: 'Invalid phone number format',
-        })
-        failedCount++
-        continue
-      }
-
-      // Retry with phone variants on "not in allowed list" so numbers
-      // that differ only in a trunk-prefix 0 still reach recipients.
-      const variants = phoneVariants(sanitized)
-      let sentMessageId: string | null = null
-      let lastError: string | null = null
-
-      for (const variant of variants) {
+    if (useWwebjs) {
+      for (const recipient of recipients) {
+        const messageText = recipient.text != null && recipient.text !== '' ? recipient.text : null
+        if (!messageText) {
+          results.push({ phone: recipient.phone, status: 'failed', error: 'No message text — template body_text is required for WhatsApp Web broadcasts' })
+          failedCount++
+          continue
+        }
         try {
-          const result = await sendTemplateMessage({
-            phoneNumberId: config.phone_number_id,
-            accessToken,
-            to: variant,
-            templateName: template_name,
-            language: template_language || 'en_US',
-            params: recipient.params ?? [],
-          })
-          sentMessageId = result.messageId
-          lastError = null
-          break
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : 'Unknown error'
-          if (!isRecipientNotAllowedError(errorMessage)) {
-            lastError = errorMessage
-            break
+          const phone = recipient.phone.replace(/\D/g, '')
+          const chatId = `${phone}@c.us`
+          const msg = await wwebjsSession!.client.sendMessage(chatId, messageText)
+          const wwebMsgId = msg.id?.id
+          if (!wwebMsgId) {
+            results.push({ phone: recipient.phone, status: 'failed', error: 'wwebjs returned no message id' })
+            failedCount++
+            continue
           }
-          lastError = errorMessage
-          // retry with next variant
+          results.push({
+            phone: recipient.phone,
+            status: 'sent',
+            whatsapp_message_id: wwebMsgId,
+          })
+          sentCount++
+        } catch (err) {
+          const error = err instanceof Error ? err.message : 'Unknown error'
+          console.error(`[broadcast/wwebjs] failed to send to ${recipient.phone}:`, error)
+          results.push({ phone: recipient.phone, status: 'failed', error })
+          failedCount++
         }
       }
+    } else {
+      // Meta path
+      const accessToken = decrypt(metaConfig!.access_token)
 
-      if (sentMessageId) {
-        results.push({
-          phone: recipient.phone,
-          status: 'sent',
-          whatsapp_message_id: sentMessageId,
-        })
-        sentCount++
-      } else {
-        console.error(
-          `Failed to send broadcast to ${recipient.phone}:`,
-          lastError
-        )
-        results.push({
-          phone: recipient.phone,
-          status: 'failed',
-          error: lastError || 'Unknown error',
-        })
-        failedCount++
+      for (const recipient of recipients) {
+        const sanitized = sanitizePhoneForMeta(recipient.phone)
+
+        if (!isValidE164(sanitized)) {
+          results.push({ phone: recipient.phone, status: 'failed', error: 'Invalid phone number format' })
+          failedCount++
+          continue
+        }
+
+        const variants = phoneVariants(sanitized)
+        let sentMessageId: string | null = null
+        let lastError: string | null = null
+
+        for (const variant of variants) {
+          try {
+            const result = await sendTemplateMessage({
+              phoneNumberId: metaConfig!.phone_number_id,
+              accessToken,
+              to: variant,
+              templateName: template_name,
+              language: template_language || 'en_US',
+              params: recipient.params ?? [],
+            })
+            sentMessageId = result.messageId
+            lastError = null
+            break
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+            if (!isRecipientNotAllowedError(errorMessage)) {
+              lastError = errorMessage
+              break
+            }
+            lastError = errorMessage
+          }
+        }
+
+        if (sentMessageId) {
+          results.push({ phone: recipient.phone, status: 'sent', whatsapp_message_id: sentMessageId })
+          sentCount++
+        } else {
+          console.error(`[broadcast/meta] failed to send to ${recipient.phone}:`, lastError)
+          results.push({ phone: recipient.phone, status: 'failed', error: lastError || 'Unknown error' })
+          failedCount++
+        }
       }
     }
 
@@ -199,13 +176,11 @@ export async function POST(request: Request) {
       total: recipients.length,
       sent: sentCount,
       failed: failedCount,
+      transport: useWwebjs ? 'wwebjs' : 'meta',
       results,
     })
   } catch (error) {
     console.error('Error in WhatsApp broadcast POST:', error)
-    return NextResponse.json(
-      { error: 'Failed to process broadcast' },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: 'Failed to process broadcast' }, { status: 500 })
   }
 }

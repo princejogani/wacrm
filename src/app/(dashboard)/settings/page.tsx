@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Settings, MessageSquare, Tag, User } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { WhatsAppConfig } from '@/components/settings/whatsapp-config';
+import { WWebJSConfig } from '@/components/settings/wwebjs-config';
 import { TemplateManager } from '@/components/settings/template-manager';
 import { TagManager } from '@/components/settings/tag-manager';
 import { ProfileForm } from '@/components/settings/profile-form';
@@ -82,8 +83,9 @@ export default function SettingsPage() {
           <SessionsCard />
         </TabsContent>
 
-        <TabsContent value="whatsapp">
+        <TabsContent value="whatsapp" className="space-y-6">
           <WhatsAppConfig />
+          <WWebJSConfig />
         </TabsContent>
 
         <TabsContent value="templates">

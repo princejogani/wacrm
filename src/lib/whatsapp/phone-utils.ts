@@ -9,8 +9,10 @@ export function sanitizePhoneForMeta(phone: string): string {
 }
 
 /**
- * Normalize phone number by removing all non-digit characters.
- * Used for comparing phone numbers in different formats.
+ * Normalize a raw phone string to digits only (no + prefix).
+ * e.g. "+91 98765 43210" → "919876543210"
+ * e.g. "+919876543210"  → "919876543210"
+ * e.g. "3186882543816"  → "3186882543816"
  */
 export function normalizePhone(phone: string): string {
   if (!phone) return ''
@@ -18,16 +20,19 @@ export function normalizePhone(phone: string): string {
 }
 
 /**
- * Compare two phone numbers accounting for trunk prefix differences.
- * e.g. "370063949836" (with trunk 0) matches "37063949836" (without trunk 0)
- * by comparing the last 8 digits.
+ * Compare two phone numbers. Normalizes both to digits-only for comparison.
+ * Exact match first; falls back to last-10-digit suffix match for legacy
+ * contacts stored without country code.
  */
 export function phonesMatch(phone1: string, phone2: string): boolean {
-  const n1 = normalizePhone(phone1)
-  const n2 = normalizePhone(phone2)
+  const n1 = phone1.replace(/\D/g, '')
+  const n2 = phone2.replace(/\D/g, '')
+  if (!n1 || !n2) return false
   if (n1 === n2) return true
-  if (n1.length >= 8 && n2.length >= 8) {
-    return n1.slice(-8) === n2.slice(-8)
+  // Suffix fallback: handles legacy contacts stored without country code
+  // e.g. "9876543210" matches "+919876543210"
+  if (n1.length >= 10 && n2.length >= 10) {
+    return n1.slice(-10) === n2.slice(-10)
   }
   return false
 }

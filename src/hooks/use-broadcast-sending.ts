@@ -76,6 +76,14 @@ type CustomValueIndex = Map<string, Map<string, string>>;
  * built-in-field mappings resolve synchronously; custom fields read
  * from a pre-built index to avoid N+1 queries during the send loop.
  */
+/**
+ * Substitute {{1}}, {{2}}, … placeholders in a template body with
+ * resolved param values — used as the plain-text fallback for wwebjs.
+ */
+export function buildPlainText(bodyText: string, params: string[]): string {
+  return bodyText.replace(/\{\{(\d+)\}\}/g, (_, n) => params[Number(n) - 1] ?? '')
+}
+
 export function resolveVariables(
   variables: Record<string, VariableMapping>,
   contact: Contact,
@@ -438,6 +446,13 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
                   customValueIndex.get(r.contact.id),
                 )
               : [],
+            // Pass resolved body text for wwebjs fallback (template body with vars substituted)
+            text: r.contact && payload.template.body_text
+              ? buildPlainText(
+                  payload.template.body_text,
+                  resolveVariables(payload.variables, r.contact, customValueIndex.get(r.contact.id)),
+                )
+              : (payload.template.body_text ?? ''),
           }));
 
         if (apiRecipients.length === 0) continue;
